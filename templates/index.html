@@ -1,0 +1,138 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>FTP Client</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+
+<div id="loading" class="hidden">
+  <div class="spin"></div>
+  <span id="loading-text">Connessione...</span>
+</div>
+
+<div id="toast-container"></div>
+
+<!-- Header -->
+<div id="header">
+  <h1>FTP Client</h1>
+  <div id="status-badge" onclick="toggleConnPanel()">
+    <div id="status-dot"></div>
+    <span id="status-text">Disconnesso</span>
+  </div>
+</div>
+
+<!-- Connection panel -->
+<div id="conn-panel">
+  <div class="field">
+    <label>Host</label>
+    <input id="inp-host" type="text" placeholder="ftp.esempio.com" autocomplete="off">
+  </div>
+  <div class="field">
+    <label>Porta</label>
+    <input id="inp-port" type="number" value="21" min="1" max="65535">
+  </div>
+  <div class="field">
+    <label>Utente</label>
+    <input id="inp-user" type="text" autocomplete="username">
+  </div>
+  <div class="field">
+    <label>Password</label>
+    <input id="inp-pass" type="password" autocomplete="current-password">
+  </div>
+  <div class="field">
+    <label>Protocollo</label>
+    <select id="inp-proto">
+      <option value="ftp">FTP</option>
+      <option value="ftps">FTPS</option>
+      <option value="sftp">SFTP</option>
+    </select>
+  </div>
+  <button class="btn btn-primary" id="btn-connect" onclick="doConnect()">Connetti</button>
+  <button class="btn btn-ghost hidden" id="btn-disconnect" onclick="doDisconnect()">Disconnetti</button>
+</div>
+
+<!-- Dual pane -->
+<div id="main">
+
+  <!-- LOCAL panel -->
+  <div id="local-panel" class="pane"
+       ondragover="onPaneDragOver(event,'local')"
+       ondragleave="onPaneDragLeave(event)"
+       ondrop="onPaneDrop(event,'local')">
+
+    <div class="pane-toolbar">
+      <span class="pane-label">💻 Locale</span>
+      <div id="local-breadcrumb" class="breadcrumb"></div>
+      <button class="btn btn-ghost btn-sm" id="local-up" onclick="localUp()">↑</button>
+    </div>
+
+    <div class="file-list-wrap" id="local-list-wrap">
+      <div class="pane-empty" id="local-empty">Caricamento...</div>
+      <table class="file-table" id="local-table" style="display:none">
+        <thead><tr>
+          <th class="col-icon"></th>
+          <th class="col-name">Nome</th>
+          <th class="col-size">Dimensione</th>
+          <th class="col-act"></th>
+        </tr></thead>
+        <tbody id="local-tbody"></tbody>
+      </table>
+    </div>
+
+    <div class="pane-actions">
+      <button class="btn btn-ghost btn-sm" onclick="localMkdir()">+ Cartella</button>
+    </div>
+  </div>
+
+  <div id="pane-divider"></div>
+
+  <!-- REMOTE panel -->
+  <div id="remote-panel" class="pane"
+       ondragover="onPaneDragOver(event,'remote')"
+       ondragleave="onPaneDragLeave(event)"
+       ondrop="onPaneDrop(event,'remote')">
+
+    <div class="pane-toolbar">
+      <span class="pane-label">🌐 Remoto</span>
+      <div id="remote-breadcrumb" class="breadcrumb"></div>
+      <button class="btn btn-ghost btn-sm" id="remote-up" onclick="remoteUp()" disabled>↑</button>
+    </div>
+
+    <div class="file-list-wrap" id="remote-list-wrap">
+      <div class="pane-empty" id="remote-empty">Connettiti a un server FTP.</div>
+      <table class="file-table" id="remote-table" style="display:none">
+        <thead><tr>
+          <th class="col-icon"></th>
+          <th class="col-name">Nome</th>
+          <th class="col-size">Dimensione</th>
+          <th class="col-act"></th>
+        </tr></thead>
+        <tbody id="remote-tbody"></tbody>
+      </table>
+    </div>
+
+    <div class="pane-actions">
+      <button class="btn btn-ghost btn-sm" id="remote-mkdir" onclick="remoteMkdir()" disabled>+ Cartella</button>
+      <button class="btn btn-danger btn-sm" id="remote-delete" onclick="remoteDelete()" disabled>Elimina</button>
+    </div>
+  </div>
+
+</div>
+
+<!-- Transfer queue strip -->
+<div id="queue-strip">
+  <div id="queue-strip-header">
+    <span id="queue-label">Trasferimenti</span>
+    <button class="btn btn-ghost btn-sm" onclick="clearDone()">Pulisci completati</button>
+  </div>
+  <div id="queue-list">
+    <span id="queue-empty" style="color:var(--muted);font-size:12px;padding:0 8px">Nessun trasferimento</span>
+  </div>
+</div>
+
+<script src="/static/app.js"></script>
+</body>
+</html>

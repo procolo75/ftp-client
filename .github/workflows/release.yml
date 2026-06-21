@@ -1,0 +1,50 @@
+name: Build & Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            artifact: ftp-client-linux
+          - os: windows-latest
+            artifact: ftp-client-windows.exe
+          - os: macos-latest
+            artifact: ftp-client-macos.zip
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: pip install flask pyinstaller
+
+      - name: Build (Linux)
+        if: runner.os == 'Linux'
+        run: pyinstaller ftp_client.spec && mv dist/ftp-client dist/ftp-client-linux
+
+      - name: Build (Windows)
+        if: runner.os == 'Windows'
+        run: pyinstaller ftp_client.spec && mv dist/ftp-client.exe dist/ftp-client-windows.exe
+        shell: bash
+
+      - name: Build (macOS .app)
+        if: runner.os == 'macOS'
+        run: |
+          pyinstaller ftp_client.spec
+          cd dist && zip -r ftp-client-macos.zip "FTP Client.app"
+
+      - name: Upload to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/${{ matrix.artifact }}
