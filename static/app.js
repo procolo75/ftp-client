@@ -5,6 +5,7 @@ let connected  = false;
 let selectedRemote = null;   // {name, type, path, size}
 let dragState  = null;       // {source:'local'|'remote', path, name, type, size}
 let jobCards   = {};
+let lastJobs   = [];         // latest queue snapshot from the server
 
 const STORAGE_KEY = "ftp-client-creds";
 
@@ -218,7 +219,7 @@ function renderFileList(panel, entries, basePath, isRemote) {
     const fullPath = joinPath(basePath, entry.name);
     const isDir = entry.type === "dir";
     const tr = document.createElement("tr");
-    tr.draggable = !isDir; // drag only files for now
+    tr.draggable = true;
     tr.innerHTML = `
       <td class="col-icon">${isDir ? "📁" : fileIcon(entry.name)}</td>
       <td class="col-name" title="${esc(fullPath)}">${esc(entry.name)}</td>
@@ -236,21 +237,19 @@ function renderFileList(panel, entries, basePath, isRemote) {
       }
     });
 
-    // Drag from this row
-    if (!isDir) {
-      tr.addEventListener("dragstart", e => {
-        dragState = {
-          source: isRemote ? "remote" : "local",
-          path: fullPath,
-          name: entry.name,
-          type: entry.type,
-          size: entry.size || 0,
-        };
-        e.dataTransfer.effectAllowed = "copy";
-        e.dataTransfer.setData("text/plain", entry.name);
-      });
-      tr.addEventListener("dragend", () => { dragState = null; });
-    }
+    // Drag from this row (files and folders)
+    tr.addEventListener("dragstart", e => {
+      dragState = {
+        source: isRemote ? "remote" : "local",
+        path: fullPath,
+        name: entry.name,
+        type: entry.type,
+        size: entry.size || 0,
+      };
+      e.dataTransfer.effectAllowed = "copy";
+      e.dataTransfer.setData("text/plain", entry.name);
+    });
+    tr.addEventListener("dragend", () => { dragState = null; });
 
     tbody.appendChild(tr);
   });
@@ -289,26 +288,37 @@ function onPaneDrop(e, targetPanel) {
   el(targetPanel + "-panel").classList.remove("drop-highlight");
   if (!dragState || dragState.source === targetPanel) return;
 
-  const { source, path, name, size } = dragState;
+  const { source, path, name, type, size } = dragState;
   dragState = null;
+  const isDir = type === "dir";
+  // Walking a folder tree can take a while: block the UI until the jobs are queued
+  if (isDir) showLoading(`Preparazione di "${name}"...`);
 
   if (targetPanel === "remote" && source === "local") {
-    // Upload: local file → FTP current dir
-    if (!connected) { toast("Non connesso", "error"); return; }
-    api("/api/upload", "POST", { local_path: path, remote_dir: remotePath })
+    // Upload: local file/folder → FTP current dir
+    if (!connected) { hideLoading(); toast("Non connesso", "error"); return; }
+    const destDir = remotePath;
+    api("/api/upload", "POST", { local_path: path, remote_dir: destDir })
       .then(res => {
-        if (res.error) toast("Errore upload: " + res.error, "error");
-        else toast(`Upload di "${name}" avviato`);
+        if (isDir) hideLoading();
+        if (res.error) { toast("Errore upload: " + res.error, "error"); return; }
+        toast(`Upload di "${name}" avviato` + (isDir ? ` (${res.files} file)` : ""));
+        // The folder now exists on the server: show it
+        if (isDir && remotePath === destDir) browseTo(destDir);
       });
   } else if (targetPanel === "local" && source === "remote") {
-    // Download: FTP file → local current dir
+    // Download: FTP file/folder → local current dir
+    const destDir = localPath;
     api("/api/download", "POST", {
       remote_path: path,
-      local_dir: localPath,
+      local_dir: destDir,
       total_bytes: size,
+      type,
     }).then(res => {
-      if (res.error) toast("Errore download: " + res.error, "error");
-      else toast(`Download di "${name}" avviato`);
+      if (isDir) hideLoading();
+      if (res.error) { toast("Errore download: " + res.error, "error"); return; }
+      toast(`Download di "${name}" avviato` + (isDir ? ` (${res.files} file)` : ""));
+      if (isDir && localPath === destDir) browseLocalTo(destDir);
     });
   }
 }
@@ -317,6 +327,7 @@ function onPaneDrop(e, targetPanel) {
 function renderQueue(jobs) {
   const list = el("queue-list");
   const empty = el("queue-empty");
+  lastJobs = jobs;
 
   jobs.forEach(job => {
     if (jobCards[job.id]) {
@@ -409,11 +420,13 @@ function startSSE() {
 
   es.addEventListener("job_done", e => {
     const d = JSON.parse(e.data);
-    if (d.status === "done") {
-      toast(`Trasferimento completato`, "success");
-      // Refresh local panel in case it was a download
-      browseLocalTo(localPath);
-    }
+    if (d.status !== "done") return;
+    // A folder transfer is many jobs: notify only once the queue has drained
+    const pending = lastJobs.some(j => j.id !== d.job_id && (j.status === "queued" || j.status === "running"));
+    if (pending) return;
+    toast(`Trasferimento completato`, "success");
+    // Refresh local panel in case it was a download
+    browseLocalTo(localPath);
   });
 
   es.addEventListener("job_error", e => {

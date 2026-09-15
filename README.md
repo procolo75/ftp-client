@@ -9,7 +9,7 @@ A lightweight, browser-based FTP client that runs locally on your machine. No in
 
 - Connect to FTP and FTPS servers
 - Browse local and remote filesystems side by side
-- Upload and download files via drag & drop
+- Upload and download files and whole folders via drag & drop
 - Transfer queue with real-time progress (speed, ETA, bytes transferred)
 - Resume interrupted transfers
 - Create and delete files and folders

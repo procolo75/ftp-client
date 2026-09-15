@@ -83,23 +83,28 @@ def test_connection():
 def list_directory(path):
     ftp = _connect()
     try:
-        try:
-            entries = []
-            for name, facts in ftp.mlsd(path):
-                if name in (".", ".."):
-                    continue
-                ftype = facts.get("type", "").lower()
-                entry_type = "dir" if ftype in ("dir", "cdir", "pdir") else "file"
-                size = int(facts.get("size", 0) or 0)
-                mtime = _fmt_mlsd_time(facts.get("modify", ""))
-                entries.append({"name": name, "type": entry_type, "size": size, "mtime": mtime})
-            return entries
-        except ftplib.all_errors:
-            lines = []
-            ftp.dir(path, lines.append)
-            return _parse_listing("\n".join(lines))
+        return _list_entries(ftp, path)
     finally:
         _quit(ftp)
+
+
+def _list_entries(ftp, path):
+    try:
+        entries = []
+        for name, facts in ftp.mlsd(path):
+            ftype = facts.get("type", "").lower()
+            # cdir/pdir are the current/parent dir: skipping them avoids loops when walking trees
+            if name in (".", "..") or ftype in ("cdir", "pdir"):
+                continue
+            entry_type = "dir" if ftype == "dir" else "file"
+            size = int(facts.get("size", 0) or 0)
+            mtime = _fmt_mlsd_time(facts.get("modify", ""))
+            entries.append({"name": name, "type": entry_type, "size": size, "mtime": mtime})
+        return entries
+    except ftplib.all_errors:
+        lines = []
+        ftp.dir(path, lines.append)
+        return [e for e in _parse_listing("\n".join(lines)) if e["name"] not in (".", "..")]
 
 
 def _fmt_mlsd_time(modify):
@@ -166,13 +171,12 @@ def _delete_dir_recursive(ftp, path):
     ftp.rmd(path)
 
 
-def enqueue_download(remote_path, local_dir, total_bytes=0):
-    job_id = str(uuid.uuid4())
+def _download_job(remote_path, local_dir, total_bytes=0, label=None):
     name = os.path.basename(remote_path)
-    job = {
-        "id": job_id,
+    return {
+        "id": str(uuid.uuid4()),
         "type": "download",
-        "name": name,
+        "name": label or name,
         "remote_path": remote_path,
         "local_path": os.path.join(local_dir, name),
         "total_bytes": total_bytes,
@@ -184,20 +188,14 @@ def enqueue_download(remote_path, local_dir, total_bytes=0):
         "error": None,
         "cancel_event": threading.Event(),
     }
-    with jobs_lock:
-        jobs_state[job_id] = job
-    job_queue.put(job)
-    _emit("queue_update", {"jobs": _snapshot()})
-    return job_id
 
 
-def enqueue_upload(local_path, remote_dir):
-    job_id = str(uuid.uuid4())
+def _upload_job(local_path, remote_dir, label=None):
     name = os.path.basename(local_path)
-    job = {
-        "id": job_id,
+    return {
+        "id": str(uuid.uuid4()),
         "type": "upload",
-        "name": name,
+        "name": label or name,
         "local_path": local_path,
         "remote_dir": remote_dir,
         "remote_path": remote_dir.rstrip("/") + "/" + name,
@@ -210,11 +208,88 @@ def enqueue_upload(local_path, remote_dir):
         "error": None,
         "cancel_event": threading.Event(),
     }
+
+
+def _submit(jobs):
+    if not jobs:
+        return
     with jobs_lock:
-        jobs_state[job_id] = job
-    job_queue.put(job)
+        for job in jobs:
+            jobs_state[job["id"]] = job
+    for job in jobs:
+        job_queue.put(job)
+    # One notification for the whole batch, not one per file
     _emit("queue_update", {"jobs": _snapshot()})
-    return job_id
+
+
+def enqueue_download(remote_path, local_dir, total_bytes=0):
+    job = _download_job(remote_path, local_dir, total_bytes)
+    _submit([job])
+    return job["id"]
+
+
+def enqueue_upload(local_path, remote_dir):
+    job = _upload_job(local_path, remote_dir)
+    _submit([job])
+    return job["id"]
+
+
+def enqueue_download_dir(remote_path, local_dir):
+    """Recreate the remote tree under local_dir and enqueue a download per file.
+
+    Returns the number of files enqueued.
+    """
+    remote_path = remote_path.rstrip("/")
+    base = remote_path.rsplit("/", 1)[-1]
+    jobs = []
+    ftp = _connect()
+    try:
+        _collect_downloads(ftp, remote_path, os.path.join(local_dir, base), base, jobs)
+    finally:
+        _quit(ftp)
+    _submit(jobs)
+    return len(jobs)
+
+
+def _collect_downloads(ftp, remote_dir, local_dir, label, jobs):
+    os.makedirs(local_dir, exist_ok=True)
+    for entry in sorted(_list_entries(ftp, remote_dir), key=lambda e: e["name"].lower()):
+        rpath = remote_dir + "/" + entry["name"]
+        elabel = label + "/" + entry["name"]
+        if entry["type"] == "dir":
+            _collect_downloads(ftp, rpath, os.path.join(local_dir, entry["name"]), elabel, jobs)
+        else:
+            jobs.append(_download_job(rpath, local_dir, entry["size"], elabel))
+
+
+def enqueue_upload_dir(local_dir, remote_dir):
+    """Recreate the local tree under remote_dir and enqueue an upload per file.
+
+    Returns the number of files enqueued.
+    """
+    local_dir = os.path.normpath(local_dir)
+    parent = os.path.dirname(local_dir)
+    remote_root = remote_dir.rstrip("/") + "/" + os.path.basename(local_dir)
+    jobs = []
+    ftp = _connect()
+    try:
+        # os.walk is top-down, so parent dirs are created before their children
+        for dirpath, dirnames, filenames in os.walk(local_dir):
+            dirnames.sort()
+            rel = os.path.relpath(dirpath, local_dir)
+            target = remote_root if rel == "." else remote_root + "/" + rel.replace(os.sep, "/")
+            try:
+                ftp.mkd(target)
+            except ftplib.error_perm:
+                pass  # Already exists
+            for name in sorted(filenames):
+                path = os.path.join(dirpath, name)
+                label = os.path.relpath(path, parent).replace(os.sep, "/")
+                jobs.append(_upload_job(path, target, label))
+    finally:
+        _quit(ftp)
+    _submit(jobs)
+    return len(jobs)
 
 
 def cancel_job(job_id):

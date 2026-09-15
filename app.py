@@ -134,18 +134,33 @@ def download():
         return jsonify({"error": "remote_path obbligatorio"}), 400
 
     os.makedirs(local_dir, exist_ok=True)
+
+    if data.get("type") == "dir":
+        try:
+            count = ftp_manager.enqueue_download_dir(remote_path, local_dir)
+        except Exception as e:
+            return jsonify({"error": str(e)}), 500
+        return jsonify({"files": count})
+
     job_id = ftp_manager.enqueue_download(remote_path, local_dir, total_bytes)
     return jsonify({"job_id": job_id})
 
 
 @app.route("/api/upload", methods=["POST"])
 def upload():
-    """Upload a local file (by path on this machine) to FTP."""
+    """Upload a local file or folder (by path on this machine) to FTP."""
     if not ftp_manager.get_session():
         return jsonify({"error": "Non connesso"}), 401
     data = request.get_json()
     local_path = data.get("local_path")
     remote_dir = data.get("remote_dir", "/")
+
+    if local_path and os.path.isdir(local_path):
+        try:
+            count = ftp_manager.enqueue_upload_dir(local_path, remote_dir)
+        except Exception as e:
+            return jsonify({"error": str(e)}), 500
+        return jsonify({"files": count})
 
     if not local_path or not os.path.isfile(local_path):
         return jsonify({"error": "File locale non trovato"}), 400
