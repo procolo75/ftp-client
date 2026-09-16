@@ -4,7 +4,6 @@ let remotePath = "/";
 let connected  = false;
 let selectedRemote = null;   // {name, type, path, size}
 let dragState  = null;       // {source:'local'|'remote', path, name, type, size}
-let jobCards   = {};
 let lastJobs   = [];         // latest queue snapshot from the server
 
 const STORAGE_KEY = "ftp-client-creds";
@@ -12,6 +11,7 @@ const STORAGE_KEY = "ftp-client-creds";
 /* ── Init ── */
 document.addEventListener("DOMContentLoaded", () => {
   loadSavedCreds();
+  initQueuePanel();
   startSSE();
   checkStatus();
   browseLocalTo("~");
@@ -324,62 +324,259 @@ function onPaneDrop(e, targetPanel) {
 }
 
 /* ── Transfer queue ── */
-function renderQueue(jobs) {
-  const list = el("queue-list");
-  const empty = el("queue-empty");
-  lastJobs = jobs;
+const QUEUE_H_KEY     = "ftp-client-queue-h";
+const QUEUE_COLL_KEY  = "ftp-client-queue-collapsed";
+const QUEUE_DEFAULT_H = 200;
+const QUEUE_MIN_H     = 92;
+const MAX_ROWS        = 300;   // cap on rendered rows; the rest is summarised
 
-  jobs.forEach(job => {
-    if (jobCards[job.id]) {
-      updateJobCard(job);
-    } else {
-      const card = createJobCard(job);
-      jobCards[job.id] = card;
-      list.insertBefore(card, empty);
+const RANK = { running: 0, queued: 1, error: 2, cancelled: 3, done: 4 };
+const STATE_LABEL = { queued: "In coda", running: "In corso", done: "Completato",
+                      error: "Errore", cancelled: "Annullato" };
+
+let queueFilter  = "all";
+let jobRows      = {};   // job id -> {row, refs}
+let rateSamples  = [];   // [totalBytesDone, timestamp] for the aggregate speed
+
+function initQueuePanel() {
+  const saved = parseInt(localStorage.getItem(QUEUE_H_KEY) || "", 10);
+  if (saved) setQueueHeight(saved);
+  if (localStorage.getItem(QUEUE_COLL_KEY) === "1") el("queue-strip").classList.add("collapsed");
+
+  const handle = el("queue-resize");
+  handle.addEventListener("mousedown", startQueueResize);
+  handle.addEventListener("dblclick", () => setQueueHeight(QUEUE_DEFAULT_H, true));
+  renderFilters();
+}
+
+function setQueueHeight(px, persist) {
+  const max = Math.max(QUEUE_MIN_H, window.innerHeight - 160);
+  const h = Math.min(Math.max(px, QUEUE_MIN_H), max);
+  document.documentElement.style.setProperty("--queue-h", h + "px");
+  if (persist !== false) localStorage.setItem(QUEUE_H_KEY, String(h));
+}
+
+function startQueueResize(e) {
+  e.preventDefault();
+  const strip = el("queue-strip");
+  strip.classList.remove("collapsed");
+  localStorage.setItem(QUEUE_COLL_KEY, "0");
+
+  const startY = e.clientY;
+  const startH = strip.getBoundingClientRect().height;
+  document.body.classList.add("resizing-queue");
+
+  const onMove = ev => setQueueHeight(startH + (startY - ev.clientY));
+  const onUp = () => {
+    document.body.classList.remove("resizing-queue");
+    document.removeEventListener("mousemove", onMove);
+    document.removeEventListener("mouseup", onUp);
+  };
+  document.addEventListener("mousemove", onMove);
+  document.addEventListener("mouseup", onUp);
+}
+
+function toggleQueue() {
+  const collapsed = el("queue-strip").classList.toggle("collapsed");
+  localStorage.setItem(QUEUE_COLL_KEY, collapsed ? "1" : "0");
+}
+
+function setQueueFilter(f) {
+  queueFilter = f;
+  renderQueue(lastJobs);
+}
+
+function renderFilters(counts) {
+  const c = counts || { all: 0, running: 0, queued: 0, done: 0, error: 0 };
+  const defs = [
+    ["all",     "Tutti",      c.all,     ""],
+    ["running", "In corso",   c.running, ""],
+    ["queued",  "In coda",    c.queued,  ""],
+    ["done",    "Completati", c.done,    ""],
+    ["error",   "Errori",     c.error,   "err"],
+  ];
+  el("queue-filters").innerHTML = defs.map(([key, label, n, extra]) =>
+    `<button class="qfilter ${extra} ${queueFilter === key ? "active" : ""}"
+             onclick="setQueueFilter('${key}')">${label} ${n}</button>`
+  ).join("");
+}
+
+function jobMatchesFilter(job) {
+  if (queueFilter === "all") return true;
+  if (queueFilter === "error") return job.status === "error" || job.status === "cancelled";
+  return job.status === queueFilter;
+}
+
+function renderQueue(jobs) {
+  lastJobs = jobs || [];
+  const list = el("queue-list");
+
+  const counts = { all: lastJobs.length, running: 0, queued: 0, done: 0, error: 0 };
+  lastJobs.forEach(j => {
+    if (j.status === "running") counts.running++;
+    else if (j.status === "queued") counts.queued++;
+    else if (j.status === "done") counts.done++;
+    else counts.error++;               // error + cancelled
+  });
+  renderFilters(counts);
+  updateAggregate();
+
+  // Running first, then queued, then failures, then completed: what matters stays on top
+  const visible = lastJobs
+    .filter(jobMatchesFilter)
+    .map((job, i) => ({ job, i }))
+    .sort((a, b) => (RANK[a.job.status] ?? 9) - (RANK[b.job.status] ?? 9) || a.i - b.i)
+    .map(x => x.job);
+
+  const shown = visible.slice(0, MAX_ROWS);
+  const shownIds = new Set(shown.map(j => j.id));
+
+  Object.keys(jobRows).forEach(id => {
+    if (!shownIds.has(id)) {
+      jobRows[id].row.remove();
+      delete jobRows[id];
     }
   });
 
-  empty.style.display = Object.keys(jobCards).length ? "none" : "";
+  let prev = null;
+  shown.forEach(job => {
+    let entry = jobRows[job.id];
+    if (!entry) {
+      entry = buildJobRow(job);
+      jobRows[job.id] = entry;
+    }
+    updateJobRow(job);
+    // Move into place only when it is not already there (keeps DOM churn low)
+    const target = prev ? prev.nextSibling : list.firstChild;
+    if (entry.row !== target) list.insertBefore(entry.row, target);
+    prev = entry.row;
+  });
+
+  el("queue-empty").style.display = shown.length ? "none" : "";
+  if (el("queue-empty").parentNode === list) list.appendChild(el("queue-empty"));
+
+  const more = el("queue-more");
+  const hidden = visible.length - shown.length;
+  more.classList.toggle("hidden", hidden <= 0);
+  if (hidden > 0) more.textContent = `… e altri ${hidden} file in elenco`;
 }
 
-function createJobCard(job) {
-  const card = document.createElement("div");
-  card.className = "job-card";
-  card.id = "job-" + job.id;
-  card.innerHTML = jobHTML(job);
-  return card;
-}
-
-function updateJobCard(job) {
-  const card = el("job-" + job.id);
-  if (!card) return;
-  card.className = "job-card " + job.status;
-  card.innerHTML = jobHTML(job);
-}
-
-function jobHTML(job) {
-  const icon = job.type === "download" ? "⬇" : "⬆";
-  const pct  = job.percent || 0;
-  const statusMap = { queued:"In coda", running:"In corso", done:"✓", error:"Errore", cancelled:"Annullato" };
-  const isRunning = job.status === "running";
-  const meta = isRunning && job.speed
-    ? `${job.speed}${job.eta ? " · " + job.eta : ""}`
-    : (statusMap[job.status] || job.status);
-  const sizeStr = isRunning && job.total_bytes
-    ? `${fmtSize(job.bytes_done || 0)} / ${fmtSize(job.total_bytes)}`
-    : "";
-  const cancel = (job.status === "queued" || job.status === "running")
-    ? `<button class="job-cancel" onclick="cancelJob('${job.id}')" title="Annulla">✕</button>` : "";
-  return `
-    <span class="job-icon">${icon}</span>
-    <div class="job-body">
-      <div class="job-name" title="${esc(job.name)}">${esc(job.name)}</div>
-      <div class="job-meta">${esc(meta)}</div>
-      <div class="job-bar-wrap"><div class="job-bar" style="width:${pct}%"></div></div>
-      ${sizeStr ? `<div class="job-size">${esc(sizeStr)}</div>` : ""}
-    </div>
-    ${cancel}
+function buildJobRow(job) {
+  const row = document.createElement("div");
+  row.id = "job-" + job.id;
+  row.className = "job-row";
+  row.innerHTML = `
+    <span class="job-icon"></span>
+    <span class="job-name"><span class="job-dir"></span><span class="job-base"></span></span>
+    <span class="job-bar-wrap"><span class="job-bar"></span></span>
+    <span class="job-bytes"></span>
+    <span class="job-rate"></span>
+    <span class="job-eta"></span>
+    <button class="job-cancel" title="Annulla">✕</button>
   `;
+  const refs = {
+    icon:  row.querySelector(".job-icon"),
+    dir:   row.querySelector(".job-dir"),
+    base:  row.querySelector(".job-base"),
+    bar:   row.querySelector(".job-bar"),
+    bytes: row.querySelector(".job-bytes"),
+    rate:  row.querySelector(".job-rate"),
+    eta:   row.querySelector(".job-eta"),
+    cancel: row.querySelector(".job-cancel"),
+  };
+  refs.cancel.onclick = () => cancelJob(job.id);
+
+  const name = String(job.name || "");
+  const cut = name.lastIndexOf("/");
+  refs.dir.textContent  = cut >= 0 ? name.slice(0, cut + 1) : "";
+  refs.base.textContent = cut >= 0 ? name.slice(cut + 1) : name;
+  row.title = (job.type === "download" ? "Download: " : "Upload: ") + name;
+  refs.icon.textContent = job.type === "download" ? "⬇" : "⬆";
+  return { row, refs };
+}
+
+function updateJobRow(job) {
+  const entry = jobRows[job.id];
+  if (!entry) return;
+  const { row, refs } = entry;
+  const running = job.status === "running";
+
+  const cls = "job-row " + job.status;
+  if (row.className !== cls) row.className = cls;
+
+  const pct = job.status === "done" ? 100 : (job.percent || 0);
+  const w = pct + "%";
+  if (refs.bar.style.width !== w) refs.bar.style.width = w;
+
+  const total = job.total_bytes || 0;
+  setText(refs.bytes, running && total
+    ? `${fmtSize(job.bytes_done || 0)} / ${fmtSize(total)}`
+    : (total ? fmtSize(total) : "—"));
+
+  setText(refs.rate, running ? (job.speed || "") : (STATE_LABEL[job.status] || job.status));
+  refs.rate.className = running ? "job-rate" : "job-rate job-state";
+
+  setText(refs.eta, running ? (job.eta || "") : (pct ? pct + "%" : ""));
+
+  const cancellable = job.status === "queued" || job.status === "running";
+  refs.cancel.classList.toggle("placeholder", !cancellable);
+  refs.cancel.disabled = !cancellable;
+}
+
+function setText(node, txt) {
+  if (node.textContent !== txt) node.textContent = txt;
+}
+
+/* Overall progress: counts, bytes, aggregate speed and ETA across the whole queue */
+function updateAggregate() {
+  const jobs = lastJobs;
+  const active = jobs.filter(j => j.status !== "cancelled");
+  const totalBytes = active.reduce((a, j) => a + (j.total_bytes || 0), 0);
+  const doneBytes = active.reduce(
+    (a, j) => a + (j.status === "done" ? (j.total_bytes || 0) : (j.bytes_done || 0)), 0);
+  const doneCount = jobs.filter(j => j.status === "done").length;
+  const errCount  = jobs.filter(j => j.status === "error").length;
+  const pending   = jobs.filter(j => j.status === "running" || j.status === "queued").length;
+
+  const pct = totalBytes ? Math.min(100, doneBytes / totalBytes * 100) : (jobs.length && !pending ? 100 : 0);
+  el("queue-total-fill").style.width = pct.toFixed(1) + "%";
+
+  // Aggregate speed from a rolling window of total bytes transferred
+  const now = Date.now();
+  rateSamples.push([doneBytes, now]);
+  while (rateSamples.length > 2 && now - rateSamples[0][1] > 6000) rateSamples.shift();
+  if (rateSamples.length > 12) rateSamples.shift();
+  let bps = 0;
+  if (pending && rateSamples.length >= 2) {
+    const [b0, t0] = rateSamples[0], [b1, t1] = rateSamples[rateSamples.length - 1];
+    const dt = (t1 - t0) / 1000;
+    if (dt > 0.5) bps = Math.max(0, (b1 - b0) / dt);
+  }
+
+  const parts = [];
+  if (!jobs.length) {
+    parts.push('<span class="strong">Nessun trasferimento</span>');
+  } else {
+    parts.push(`<span class="strong">${doneCount}/${jobs.length} file</span>`);
+    if (totalBytes) parts.push(`${fmtSize(doneBytes)} / ${fmtSize(totalBytes)} · ${Math.round(pct)}%`);
+    if (bps > 0) parts.push(`<span class="rate">${fmtSize(bps)}/s</span>`);
+    if (bps > 0 && totalBytes > doneBytes) parts.push(`~${fmtDuration((totalBytes - doneBytes) / bps)} rimanenti`);
+    if (!pending && jobs.length) parts.push(errCount ? `${errCount} falliti` : "tutto completato");
+  }
+  el("queue-summary").innerHTML = parts.join('<span class="sep">·</span>');
+
+  const label = pending ? `Trasferimenti (${pending})` : "Trasferimenti";
+  setText(el("queue-label"), label);
+  document.title = pending ? `${Math.round(pct)}% · FTP Client` : "FTP Client";
+}
+
+function fmtDuration(sec) {
+  sec = Math.max(0, Math.round(sec));
+  if (sec < 60) return sec + "s";
+  const m = Math.floor(sec / 60), s = sec % 60;
+  if (m < 60) return s ? `${m}m ${s}s` : `${m}m`;
+  const h = Math.floor(m / 60);
+  return `${h}h ${m % 60}m`;
 }
 
 function cancelJob(jobId) {
@@ -387,19 +584,19 @@ function cancelJob(jobId) {
 }
 
 function clearDone() {
-  const list = el("queue-list");
-  Object.entries(jobCards).forEach(([id, card]) => {
-    if (["done","error","cancelled"].includes(card.dataset.status || card.className.replace("job-card ","").trim())) {
-      list.removeChild(card);
-      delete jobCards[id];
-    }
-    // Also clear by class
-    if (card.classList.contains("done") || card.classList.contains("error") || card.classList.contains("cancelled")) {
-      if (list.contains(card)) list.removeChild(card);
-      delete jobCards[id];
-    }
-  });
-  el("queue-empty").style.display = Object.keys(jobCards).length ? "none" : "";
+  const keep = lastJobs.filter(j => !["done", "error", "cancelled"].includes(j.status));
+  const removed = lastJobs.length - keep.length;
+  rateSamples = [];
+  renderQueue(keep);
+  fetch("/api/queue/clear", { method: "POST" })
+    .then(() => refreshQueue())
+    .catch(() => {});
+  if (removed) toast(`${removed} voci rimosse dall'elenco`);
+}
+
+async function refreshQueue() {
+  const res = await api("/api/queue");
+  if (!res.error && Array.isArray(res.jobs)) renderQueue(res.jobs);
 }
 
 /* ── SSE ── */
@@ -408,14 +605,18 @@ function startSSE() {
 
   es.addEventListener("progress", e => {
     const d = JSON.parse(e.data);
-    const card = el("job-" + d.job_id);
-    if (!card) return;
-    const bar  = card.querySelector(".job-bar");
-    const meta = card.querySelector(".job-meta");
-    const size = card.querySelector(".job-size");
-    if (bar)  bar.style.width = d.percent + "%";
-    if (meta) meta.textContent = d.speed + (d.eta ? " · " + d.eta : "");
-    if (size && d.total_bytes) size.textContent = fmtSize(d.bytes_done) + " / " + fmtSize(d.total_bytes);
+    // Patch the local snapshot so the row and the aggregate stay in sync
+    const job = lastJobs.find(j => j.id === d.job_id);
+    if (job) {
+      job.status      = "running";
+      job.percent     = d.percent;
+      job.speed       = d.speed;
+      job.eta         = d.eta;
+      job.bytes_done  = d.bytes_done;
+      job.total_bytes = d.total_bytes || job.total_bytes;
+      updateJobRow(job);
+      updateAggregate();
+    }
   });
 
   es.addEventListener("job_done", e => {
@@ -440,10 +641,7 @@ function startSSE() {
   });
 
   // Polling fallback: aggiorna la coda ogni 1.5 s anche se SSE non recapita eventi
-  setInterval(async () => {
-    const res = await api("/api/queue");
-    if (!res.error && Array.isArray(res.jobs)) renderQueue(res.jobs);
-  }, 1500);
+  setInterval(refreshQueue, 1500);
 }
 
 /* ── Utilities ── */

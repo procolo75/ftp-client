@@ -174,6 +174,11 @@ def get_queue():
     return jsonify({"jobs": ftp_manager.get_queue()})
 
 
+@app.route("/api/queue/clear", methods=["POST"])
+def clear_queue():
+    return jsonify({"removed": ftp_manager.clear_finished()})
+
+
 @app.route("/api/queue/<job_id>", methods=["DELETE"])
 def cancel_job(job_id):
     ok = ftp_manager.cancel_job(job_id)

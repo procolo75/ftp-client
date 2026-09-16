@@ -48,7 +48,7 @@ if _sys.platform == 'darwin':
         bundle_identifier='com.procolocarannante.ftp-client',
         info_plist={
             'CFBundleName': 'FTP Client',
-            'CFBundleShortVersionString': '1.0.0',
+            'CFBundleShortVersionString': '1.2.0',
             'NSHighResolutionCapable': True,
             'LSUIElement': True,
         },

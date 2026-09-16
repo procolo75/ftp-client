@@ -313,6 +313,18 @@ def get_queue():
         return _snapshot()
 
 
+def clear_finished():
+    """Drop finished jobs from the queue. Returns how many were removed."""
+    finished = ("done", "error", "cancelled")
+    with jobs_lock:
+        stale = [jid for jid, job in jobs_state.items() if job["status"] in finished]
+        for jid in stale:
+            del jobs_state[jid]
+        snapshot = _snapshot()
+    _emit("queue_update", {"jobs": snapshot})
+    return len(stale)
+
+
 def _snapshot():
     return [
         {k: v for k, v in job.items() if k != "cancel_event"}

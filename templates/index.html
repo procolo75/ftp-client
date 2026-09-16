@@ -122,15 +122,25 @@
 
 </div>
 
-<!-- Transfer queue strip -->
+<!-- Transfer queue panel -->
 <div id="queue-strip">
+  <div id="queue-resize" title="Trascina per ridimensionare · doppio clic per reimpostare"></div>
+
   <div id="queue-strip-header">
+    <button id="queue-toggle" onclick="toggleQueue()" title="Comprimi/espandi">▾</button>
     <span id="queue-label">Trasferimenti</span>
+    <span id="queue-summary"></span>
+    <div id="queue-filters"></div>
     <button class="btn btn-ghost btn-sm" onclick="clearDone()">Pulisci completati</button>
   </div>
+
+  <div id="queue-total-bar"><div id="queue-total-fill"></div></div>
+
   <div id="queue-list">
-    <span id="queue-empty" style="color:var(--muted);font-size:12px;padding:0 8px">Nessun trasferimento</span>
+    <div id="queue-empty">Nessun trasferimento</div>
   </div>
+
+  <div id="queue-more" class="hidden"></div>
 </div>
 
 <script src="/static/app.js"></script>
