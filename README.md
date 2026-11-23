@@ -51,6 +51,8 @@ pip install flask pyinstaller
 python3 app.py                   # Run in development mode
 ```
 
+On macOS you can also double-click `Avvia FTP Client.command` to start the app from source (it uses `.venv`, and if the app is already running it just opens the browser).
+
 To build a standalone executable:
 
 ```bash
